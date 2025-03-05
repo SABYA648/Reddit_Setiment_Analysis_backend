@@ -10,3 +10,4 @@ psycopg2
 sqlalchemy
 flask_sqlalchemy
 psycopg2-binary
+gunicorn
