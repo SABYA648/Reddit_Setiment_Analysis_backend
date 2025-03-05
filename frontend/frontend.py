@@ -16,7 +16,7 @@ with st.sidebar.form("search_form"):
 
 if submit_button and search_phrase:
     st.info("Processing... Please wait.")
-    backend_url = "https://<YOUR_BACKEND_SUBDOMAIN>.onrender.com"  # Replace with your actual backend URL
+    backend_url = "https://reddit-setiment-analysis.onrender.com"  # Replace with your actual backend URL
 
     try:
         r = requests.post(f"{backend_url}/start_process", json={"search_phrase": search_phrase})
