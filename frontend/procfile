@@ -1,0 +1,1 @@
+web: streamlit run frontend.py --server.enableCORS false
