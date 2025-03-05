@@ -8,7 +8,6 @@ import logging
 
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text
 import praw
 import nltk
 import pandas as pd
@@ -18,32 +17,33 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from wordcloud import WordCloud
 from nltk.corpus import stopwords
 
-# Configure logging
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("analysis")
 
-# -------------------------
 # Download required NLTK data
-# -------------------------
 nltk.download('vader_lexicon')
 nltk.download('stopwords')
 nltk.download('punkt')
 sia = SentimentIntensityAnalyzer()
 stop_words = set(stopwords.words("english"))
 
-# -------------------------
 # Flask App and PostgreSQL Database Setup
-# -------------------------
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL", "sqlite:///reddit_data.db")
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+    "DATABASE_URL",
+    "sqlite:///reddit_data.db"
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# Optionally add engine options (e.g. pool size) if needed
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_size": 5, "max_overflow": 10, "pool_timeout": 30}
+# Optional: fine-tune engine options (e.g., pool size)
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 5,
+    'max_overflow': 10,
+    'pool_timeout': 30
+}
 db = SQLAlchemy(app)
 
-# -------------------------
 # Define Models
-# -------------------------
 class RedditPost(db.Model):
     __tablename__ = "reddit_posts"
     id = db.Column(db.String, primary_key=True)
@@ -71,77 +71,55 @@ class RedditComment(db.Model):
 
 with app.app_context():
     db.create_all()
-    # Insert a dummy row into reddit_posts to verify connection (only once)
-    dummy = RedditPost(
-        id="dummy",
-        subreddit="dummy",
-        author="dummy",
-        title="dummy",
-        content="dummy",
-        upvotes=0,
-        comments=0,
-        timestamp=0,
-        sentiment=0.0,
-        search_phrase="dummy"
-    )
-    if not RedditPost.query.get("dummy"):
+    # Insert dummy row if table is empty
+    if not RedditPost.query.first():
+        dummy = RedditPost(
+            id="dummy",
+            subreddit="dummy",
+            author="dummy",
+            title="dummy",
+            content="dummy",
+            upvotes=0,
+            comments=0,
+            timestamp=0,
+            sentiment=0.0,
+            search_phrase="dummy"
+        )
         db.session.add(dummy)
         db.session.commit()
         logger.info("Inserted dummy row into reddit_posts.")
 
-def clear_db():
-    with app.app_context():
-        try:
-            db.session.query(RedditComment).delete()
-            db.session.query(RedditPost).delete()
-            db.session.commit()
-            logger.info("Cleared database tables.")
-        except Exception as e:
-            db.session.rollback()
-            logger.error("Error clearing database: %s", e)
-
-# -------------------------
 # Initialize PRAW
-# -------------------------
 CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"
 CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"
 USER_AGENT = "RedditGNN/1.0"
 
-try:
-    reddit = praw.Reddit(client_id=CLIENT_ID,
-                         client_secret=CLIENT_SECRET,
-                         user_agent=USER_AGENT)
-    reddit.read_only = True
-    logger.info("PRAW initialized successfully.")
-except Exception as e:
-    logger.error("Error initializing PRAW: %s", e)
-    raise
+reddit = praw.Reddit(client_id=CLIENT_ID,
+                     client_secret=CLIENT_SECRET,
+                     user_agent=USER_AGENT)
+reddit.read_only = True
+logger.info("PRAW initialized successfully.")
 
-# -------------------------
 # Global Variables for Progress Tracking
-# -------------------------
-PROGRESS = 0         # Percentage (0-100) based on posts processed
+PROGRESS = 0         # 0-100
 PROCESSING_DONE = False
-TOTAL_POSTS = 0      # Total posts fetched
+TOTAL_POSTS = 0
 
-# -------------------------
 # Home Route
-# -------------------------
 @app.route("/")
 def home():
     return "Reddit Sentiment Analysis Backend is running!"
 
-# -------------------------
-# Function to Process Comments for a Given Post
-# -------------------------
+# Function to process comments in a separate thread
 def process_comments(post, phrase):
     with app.app_context():
         from sqlalchemy.orm import scoped_session, sessionmaker
         Session = scoped_session(sessionmaker(bind=db.engine))
         session = Session()
-        parent = session.query(RedditPost).get(post.id)
+        # Confirm parent post exists
+        parent = session.get(RedditPost, post.id)
         if not parent:
-            logger.warning("Parent post %s not found in DB. Skipping comment processing.", post.id)
+            logger.warning(f"Parent post {post.id} not found. Skipping comments.")
             session.remove()
             return
         try:
@@ -149,9 +127,8 @@ def process_comments(post, phrase):
             for comment in post.comments.list():
                 if comment and comment.id:
                     try:
-                        # Re-check parent existence before inserting comment
-                        if not session.query(RedditPost).get(post.id):
-                            logger.warning("Post %s missing when processing comment %s. Skipping.", post.id, comment.id)
+                        if not session.get(RedditPost, post.id):
+                            logger.warning(f"Post {post.id} missing when processing comment {comment.id}.")
                             continue
                         rc = RedditComment(
                             id=comment.id,
@@ -165,35 +142,31 @@ def process_comments(post, phrase):
                             search_phrase=phrase
                         )
                         session.merge(rc)
-                        logger.info("Inserted comment: %s (score: %s)", comment.id, comment.score)
+                        logger.info(f"Inserted comment: {comment.id} (score: {comment.score})")
                     except Exception as ce:
-                        logger.error("Error inserting comment %s: %s", comment.id, ce)
+                        logger.error(f"Error inserting comment {comment.id}: {ce}")
             session.commit()
         except Exception as ce:
+            logger.error(f"Error processing comments for post {post.id}: {ce}")
             session.rollback()
-            logger.error("Error processing comments for post %s: %s", post.id, ce)
         finally:
             session.remove()
 
-# -------------------------
-# Fetch and Process Data (Posts and Comments)
-# -------------------------
+# Function to fetch and process posts and comments
 def fetch_and_process_data(phrase, limit=49):
     global PROGRESS, PROCESSING_DONE, TOTAL_POSTS
+    with app.app_context():
+        db.session.rollback()  # Ensure session is clean
     PROGRESS = 0
     PROCESSING_DONE = False
-    try:
-        posts = list(reddit.subreddit("all").search(phrase, limit=limit, sort="relevance"))
-    except Exception as e:
-        logger.error("Error fetching posts from Reddit: %s", e)
-        return
+    posts = list(reddit.subreddit("all").search(phrase, limit=limit, sort="relevance"))
     TOTAL_POSTS = len(posts)
-    logger.info("Found %s posts for phrase '%s'.", TOTAL_POSTS, phrase)
+    logger.info(f"Found {TOTAL_POSTS} posts for phrase '{phrase}'.")
     processed = 0
     comment_threads = []
     for post in posts:
         if post and post.id:
-            text = post.selftext if post.selftext.strip() != "" else post.title
+            text = post.selftext if post.selftext.strip() else post.title
             compound = sia.polarity_scores(text)['compound']
             try:
                 rp = RedditPost(
@@ -210,25 +183,23 @@ def fetch_and_process_data(phrase, limit=49):
                 )
                 db.session.merge(rp)
                 db.session.commit()
-                logger.info("Inserted post: %s - %s...", post.id, post.title[:50])
+                logger.info(f"Inserted post: {post.id} - {post.title[:50]}...")
             except Exception as e:
                 db.session.rollback()
-                logger.error("Error inserting post %s: %s", post.id, e)
+                logger.error(f"Error inserting post {post.id}: {e}")
             t = threading.Thread(target=process_comments, args=(post, phrase))
             t.start()
             comment_threads.append(t)
             processed += 1
             PROGRESS = int((processed / TOTAL_POSTS) * 100)
-            logger.info("Progress (posts processed): %s%%", PROGRESS)
+            logger.info(f"Progress (posts processed): {PROGRESS}%")
     for t in comment_threads:
         t.join()
     PROGRESS = 100
     PROCESSING_DONE = True
     logger.info("Processing complete.")
 
-# -------------------------
 # Analysis Functions
-# -------------------------
 def sentiment_category(compound):
     if compound > 0.8:
         return "Very Positive"
@@ -245,11 +216,7 @@ def analyze_data(phrase):
     with app.app_context():
         conn = db.engine.connect()
         try:
-            qry = text("SELECT * FROM reddit_posts WHERE search_phrase = :phrase")
-            df = pd.read_sql_query(qry, conn, params={"phrase": phrase})
-        except Exception as e:
-            logger.error("Error executing query: %s", e)
-            df = pd.DataFrame()
+            df = pd.read_sql_query("SELECT * FROM reddit_posts WHERE search_phrase = :phrase", conn, params={"phrase": phrase})
         finally:
             conn.close()
     if df.empty:
@@ -278,9 +245,7 @@ def analyze_data(phrase):
         "word_cloud": img_str
     }
 
-# -------------------------
 # Flask Endpoints
-# -------------------------
 @app.route('/start_process', methods=['POST'])
 def start_process():
     global PROGRESS, PROCESSING_DONE
@@ -288,7 +253,11 @@ def start_process():
     phrase = data.get("search_phrase", "").strip()
     if not phrase:
         return jsonify({"error": "search_phrase is required"}), 400
-    clear_db()
+    with app.app_context():
+        logger.info("Clearing database tables.")
+        db.session.query(RedditComment).delete()
+        db.session.query(RedditPost).delete()
+        db.session.commit()
     PROGRESS = 0
     PROCESSING_DONE = False
     thread = threading.Thread(target=fetch_and_process_data, args=(phrase, 49))
@@ -311,5 +280,4 @@ def get_results():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    # For production, use a WSGI server such as gunicorn
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
