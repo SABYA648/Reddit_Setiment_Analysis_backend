@@ -20,6 +20,12 @@ from nltk.corpus import stopwords
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 20,        # Increase the base pool size
+    'max_overflow': 10,     # Allow additional overflow connections
+    'pool_timeout': 30      # Timeout before giving up
+}
+
 # -------------------------
 # Download required NLTK data
 # -------------------------
@@ -88,6 +94,8 @@ with app.app_context():
         db.session.add(dummy)
         db.session.commit()
         logging.info("Inserted dummy row into reddit_posts.")
+
+
 
 # -------------------------
 # Initialize PRAW
