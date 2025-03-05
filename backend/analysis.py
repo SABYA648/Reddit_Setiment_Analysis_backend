@@ -1,3 +1,7 @@
+@app.route("/")
+def home():
+    return "Reddit Sentiment Analysis Backend is running!"
+
 from flask import Flask, request, jsonify
 import sqlite3
 import praw
