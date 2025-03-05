@@ -30,9 +30,7 @@ stop_words = set(stopwords.words("english"))
 # Flask App and PostgreSQL Database Setup
 # -------------------------
 app = Flask(__name__)
-# DATABASE_URL should be set in Render's environment variables.
-# For example, set it to:
-# postgresql://reddit_sentiment_analysis_db_user:picVqRyHHoWGOUMzH497SjmEQk0S0HmW@dpg-cv427mhu0jms73ef5eb0-a.oregon-postgres.render.com/reddit_sentiment_analysis_db
+# Use DATABASE_URL environment variable (set in Render) or fallback to SQLite for local testing
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL", "sqlite:///reddit_data.db")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -166,7 +164,7 @@ def fetch_and_process_data(phrase, limit=49):
                 print(f"Inserted post: {post.id} - {post.title[:50]}...")
             except Exception as e:
                 print(f"Error inserting post {post.id}: {e}")
-            # Start thread for comments
+            # Process comments in a separate thread
             t = threading.Thread(target=process_comments, args=(post, phrase))
             t.start()
             comment_threads.append(t)
