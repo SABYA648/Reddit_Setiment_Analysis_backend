@@ -3,8 +3,6 @@ import requests
 import time
 import pandas as pd
 import plotly.express as px
-import networkx as nx
-import matplotlib.pyplot as plt
 import base64
 
 st.set_page_config(page_title="Reddit Analysis Dashboard", layout="wide")
@@ -19,16 +17,17 @@ with st.sidebar.form("search_form"):
 
 if submit_button and search_phrase:
     st.info("Processing... Please wait.")
-    backend_url = "https://reddit-setiment-analysis.onrender.com"  # Ensure your Flask backend is running at this URL
-
-    # Start processing
+    # Replace with your actual backend URL from Render
+    backend_url = "https://reddit-setiment-analysis.onrender.com"
+    
+    # Start processing by calling /start_process on the backend
     start_response = requests.post(f"{backend_url}/start_process", json={"search_phrase": search_phrase})
     if start_response.status_code != 200:
         st.error(f"Error starting process: {start_response.text}")
     else:
         st.success("Processing started.")
     
-    # Poll progress endpoint
+    # Poll progress every 5 seconds
     progress_bar = st.progress(0)
     progress_text = st.empty()
     while True:
@@ -46,8 +45,8 @@ if submit_button and search_phrase:
         else:
             st.error("Error retrieving progress")
             break
-
-    # Once processing is complete, fetch results
+    
+    # Once processing is complete, fetch results from /results
     results_response = requests.get(f"{backend_url}/results", params={"search_phrase": search_phrase})
     if results_response.status_code != 200:
         st.error(f"Error fetching results: {results_response.text}")
