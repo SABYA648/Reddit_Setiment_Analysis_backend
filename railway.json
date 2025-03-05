@@ -1,0 +1,18 @@
+{
+    "services": [
+      {
+        "name": "backend",
+        "build": {
+          "root": "backend"
+        },
+        "startCommand": "python analysis.py"
+      },
+      {
+        "name": "frontend",
+        "build": {
+          "root": "frontend"
+        },
+        "startCommand": "streamlit run frontend.py --server.enableCORS false"
+      }
+    ]
+  }
