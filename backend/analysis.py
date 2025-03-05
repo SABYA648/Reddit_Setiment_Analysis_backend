@@ -8,40 +8,31 @@ import logging
 
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.orm import scoped_session, sessionmaker
 
 import praw
 import nltk
 import pandas as pd
-import networkx as nx
-from collections import Counter
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from wordcloud import WordCloud
 from nltk.corpus import stopwords
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# -------------------------
 # Download required NLTK data
-# -------------------------
 nltk.download('vader_lexicon')
 nltk.download('stopwords')
 nltk.download('punkt')
 sia = SentimentIntensityAnalyzer()
 stop_words = set(stopwords.words("english"))
 
-# -------------------------
-# Flask App and PostgreSQL Database Setup
-# -------------------------
+# Initialize Flask and Database (PostgreSQL if DATABASE_URL is set, otherwise SQLite)
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL", "sqlite:///reddit_data.db")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# -------------------------
 # Define Models
-# -------------------------
 class RedditPost(db.Model):
     __tablename__ = "reddit_posts"
     id = db.Column(db.String, primary_key=True)
@@ -49,10 +40,10 @@ class RedditPost(db.Model):
     author = db.Column(db.String, nullable=False)
     title = db.Column(db.String, nullable=False)
     content = db.Column(db.Text, nullable=False)
-    upvotes = db.Column(db.Integer, default=0)
-    comments = db.Column(db.Integer, default=0)
-    timestamp = db.Column(db.Integer, default=0)
-    sentiment = db.Column(db.Float, default=0.0)
+    upvotes = db.Column(db.Integer)
+    comments = db.Column(db.Integer)
+    timestamp = db.Column(db.Integer)
+    sentiment = db.Column(db.Float)
     search_phrase = db.Column(db.String, nullable=False)
 
 class RedditComment(db.Model):
@@ -62,97 +53,66 @@ class RedditComment(db.Model):
     subreddit = db.Column(db.String, nullable=False)
     author = db.Column(db.String, nullable=False)
     content = db.Column(db.Text, nullable=False)
-    score = db.Column(db.Integer, default=0)
-    timestamp = db.Column(db.Integer, default=0)
+    score = db.Column(db.Integer)
+    timestamp = db.Column(db.Integer)
     parent_id = db.Column(db.String)
     search_phrase = db.Column(db.String, nullable=False)
 
+# Create tables and insert a dummy row immediately for testing database connectivity
 with app.app_context():
-    try:
-        db.create_all()
-        # Insert dummy row if not exists
-        if not RedditPost.query.filter_by(id="dummy").first():
-            dummy_post = RedditPost(
-                id="dummy",
-                subreddit="dummy",
-                author="dummy",
-                title="dummy",
-                content="dummy",
-                upvotes=0,
-                comments=0,
-                timestamp=0,
-                sentiment=0.0,
-                search_phrase="dummy"
-            )
-            db.session.add(dummy_post)
-            db.session.commit()
-            logging.info("Inserted dummy row into reddit_posts.")
-    except Exception as e:
-        logging.error(f"Database initialization error: {e}")
+    db.create_all()
+    if not RedditPost.query.first():
+        dummy = RedditPost(
+            id="dummy",
+            subreddit="dummy",
+            author="dummy",
+            title="dummy",
+            content="dummy",
+            upvotes=0,
+            comments=0,
+            timestamp=0,
+            sentiment=0.0,
+            search_phrase="dummy"
+        )
+        db.session.add(dummy)
+        db.session.commit()
+        logging.info("Inserted dummy row into reddit_posts.")
 
-def clear_db():
-    with app.app_context():
-        try:
-            db.session.query(RedditComment).delete()
-            db.session.query(RedditPost).delete()
-            db.session.commit()
-            logging.info("Cleared database tables.")
-        except Exception as e:
-            db.session.rollback()
-            logging.error(f"Error clearing database: {e}")
-
-# -------------------------
 # Initialize PRAW
-# -------------------------
 CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"
 CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"
 USER_AGENT = "RedditGNN/1.0"
+reddit = praw.Reddit(client_id=CLIENT_ID,
+                     client_secret=CLIENT_SECRET,
+                     user_agent=USER_AGENT)
+reddit.read_only = True
+logging.info("PRAW initialized successfully.")
 
-try:
-    reddit = praw.Reddit(client_id=CLIENT_ID,
-                         client_secret=CLIENT_SECRET,
-                         user_agent=USER_AGENT)
-    reddit.read_only = True
-    logging.info("PRAW initialized successfully.")
-except Exception as e:
-    logging.error(f"PRAW initialization error: {e}")
-
-# -------------------------
-# Global Variables for Progress Tracking
-# -------------------------
-PROGRESS = 0         # Percentage (0-100) based on posts processed
+# Global progress tracking
+PROGRESS = 0
 PROCESSING_DONE = False
-TOTAL_POSTS = 0      # Total posts fetched
+TOTAL_POSTS = 0
 
-# -------------------------
-# Home Route
-# -------------------------
 @app.route("/")
 def home():
     return "Reddit Sentiment Analysis Backend is running!"
 
-# -------------------------
-# Function to Process Comments for a Given Post
-# -------------------------
 def process_comments(post, phrase):
+    # Wrap thread work in application context for thread safety
     with app.app_context():
+        from sqlalchemy.orm import scoped_session, sessionmaker
         Session = scoped_session(sessionmaker(bind=db.engine))
         session = Session()
+        parent = session.query(RedditPost).get(post.id)
+        if not parent:
+            logging.warning(f"Parent post {post.id} not found in DB. Skipping comments.")
+            session.remove()
+            return
         try:
-            # Check if parent post exists in DB
-            parent = session.query(RedditPost).get(post.id)
-            if not parent:
-                logging.warning(f"Parent post {post.id} not found in DB. Skipping comments.")
-                session.remove()
-                return
-            try:
-                post.comments.replace_more(limit=None)
-            except Exception as e:
-                logging.error(f"Error replacing more comments for post {post.id}: {e}")
+            post.comments.replace_more(limit=None)
             for comment in post.comments.list():
                 if comment and comment.id:
                     try:
-                        # Ensure parent exists before inserting
                         if not session.query(RedditPost).get(post.id):
                             logging.warning(f"Post {post.id} missing when processing comment {comment.id}.")
                             continue
@@ -168,28 +128,20 @@ def process_comments(post, phrase):
                             search_phrase=phrase
                         )
                         session.merge(rc)
-                        logging.info(f"Inserted comment {comment.id} (score: {comment.score}) for post {post.id}.")
+                        logging.info(f"Inserted comment {comment.id} (score: {comment.score}).")
                     except Exception as ce:
                         logging.error(f"Error inserting comment {comment.id}: {ce}")
             session.commit()
         except Exception as ce:
-            session.rollback()
             logging.error(f"Error processing comments for post {post.id}: {ce}")
         finally:
             session.remove()
 
-# -------------------------
-# Fetch and Process Data (Posts and Comments)
-# -------------------------
 def fetch_and_process_data(phrase, limit=49):
     global PROGRESS, PROCESSING_DONE, TOTAL_POSTS
     PROGRESS = 0
     PROCESSING_DONE = False
-    try:
-        posts = list(reddit.subreddit("all").search(phrase, limit=limit, sort="relevance"))
-    except Exception as e:
-        logging.error(f"Error fetching posts for phrase '{phrase}': {e}")
-        return
+    posts = list(reddit.subreddit("all").search(phrase, limit=limit, sort="relevance"))
     TOTAL_POSTS = len(posts)
     logging.info(f"Found {TOTAL_POSTS} posts for phrase '{phrase}'.")
     processed = 0
@@ -222,16 +174,12 @@ def fetch_and_process_data(phrase, limit=49):
             comment_threads.append(t)
             processed += 1
             PROGRESS = int((processed / TOTAL_POSTS) * 100)
-            logging.info(f"Progress: {PROGRESS}% ({processed}/{TOTAL_POSTS} posts processed)")
+            logging.info(f"Progress: {PROGRESS}% (posts processed)")
     for t in comment_threads:
         t.join()
     PROGRESS = 100
     PROCESSING_DONE = True
-    logging.info("Data processing complete.")
 
-# -------------------------
-# Analysis Functions
-# -------------------------
 def sentiment_category(compound):
     if compound > 0.8:
         return "Very Positive"
@@ -245,20 +193,15 @@ def sentiment_category(compound):
         return "Very Negative"
 
 def analyze_data(phrase):
-    try:
-        conn = db.engine.connect()
-    except Exception as e:
-        logging.error(f"Error connecting to database for analysis: {e}")
-        return {}
+    conn = db.engine.connect()
     try:
         df = pd.read_sql_query("SELECT * FROM reddit_posts WHERE search_phrase = :phrase", conn, params={"phrase": phrase})
     except Exception as e:
-        logging.error(f"Error executing query: {e}")
+        logging.error(f"Error executing SQL query: {e}")
         conn.close()
         return {}
     conn.close()
     if df.empty:
-        logging.info("No data found for analysis.")
         return {}
     df['sentiment_category'] = df['sentiment'].apply(sentiment_category)
     sentiment_counts = df['sentiment_category'].value_counts().to_dict()
@@ -271,15 +214,11 @@ def analyze_data(phrase):
     trend.columns = ["Positive", "Negative"]
     trend_dict = {str(k): {"Positive": int(v["Positive"]), "Negative": int(v["Negative"])} for k, v in trend.to_dict(orient='index').items()}
     text_all = " ".join(df['title'].tolist() + df['content'].tolist()).lower()
-    try:
-        wc = WordCloud(width=800, height=400, background_color='white', max_words=25,
-                       stopwords=stop_words, prefer_horizontal=1.0, collocations=False).generate(text_all)
-        img_buffer = BytesIO()
-        wc.to_image().save(img_buffer, format="PNG")
-        img_str = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
-    except Exception as e:
-        logging.error(f"Error generating word cloud: {e}")
-        img_str = ""
+    wc = WordCloud(width=800, height=400, background_color='white', max_words=25,
+                   stopwords=stop_words, prefer_horizontal=1.0, collocations=False).generate(text_all)
+    img_buffer = BytesIO()
+    wc.to_image().save(img_buffer, format="PNG")
+    img_str = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
     return {
         "sentiment_distribution": sentiment_counts,
         "top_subreddits": top_subreddits,
@@ -288,9 +227,6 @@ def analyze_data(phrase):
         "word_cloud": img_str
     }
 
-# -------------------------
-# Flask Endpoints
-# -------------------------
 @app.route('/start_process', methods=['POST'])
 def start_process_route():
     global PROGRESS, PROCESSING_DONE
@@ -298,7 +234,12 @@ def start_process_route():
     phrase = data.get("search_phrase", "").strip()
     if not phrase:
         return jsonify({"error": "search_phrase is required"}), 400
-    clear_db()
+    logging.info("Clearing database tables.")
+    with app.app_context():
+        db.session.query(RedditComment).delete()
+        db.session.query(RedditPost).delete()
+        db.session.commit()
+        logging.info("Database tables cleared.")
     PROGRESS = 0
     PROCESSING_DONE = False
     thread = threading.Thread(target=fetch_and_process_data, args=(phrase, 49))
