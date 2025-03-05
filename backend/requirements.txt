@@ -6,3 +6,5 @@ networkx==2.8.8
 wordcloud
 Werkzeug<3.0
 numpy==1.23.5
+psycopg2
+sqlalchemy
