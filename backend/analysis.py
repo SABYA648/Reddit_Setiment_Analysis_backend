@@ -7,7 +7,7 @@ import datetime
 
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text  # Needed to wrap raw SQL queries
+from sqlalchemy import text
 
 import praw
 import nltk
@@ -31,8 +31,7 @@ stop_words = set(stopwords.words("english"))
 # Flask App and PostgreSQL Database Setup
 # -------------------------
 app = Flask(__name__)
-# DATABASE_URL should be set in Render's environment variables.
-# For local testing, this defaults to SQLite.
+# Use DATABASE_URL from environment (set in Render) or default to SQLite for local testing.
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL", "sqlite:///reddit_data.db")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -77,8 +76,8 @@ def clear_db():
 # -------------------------
 # Initialize PRAW
 # -------------------------
-CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"  # Replace with your actual client ID
-CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"  # Replace with your actual client secret
+CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"       # Replace with your client ID
+CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"  # Replace with your client secret
 USER_AGENT = "RedditGNN/1.0"
 
 reddit = praw.Reddit(client_id=CLIENT_ID,
@@ -89,7 +88,7 @@ reddit.read_only = True
 # -------------------------
 # Global Variables for Progress Tracking
 # -------------------------
-PROGRESS = 0         # Percentage (0-100) based on posts processed (post-level only)
+PROGRESS = 0         # Percentage (0-100) based on posts processed (post-level)
 PROCESSING_DONE = False
 TOTAL_POSTS = 0      # Total posts fetched
 
@@ -104,8 +103,10 @@ def home():
 # Function to Process Comments (runs in a separate thread per post)
 # -------------------------
 def process_comments(post, phrase):
-    # Wrap the entire thread function inside an application context.
-    with app.app_context():
+    # For each thread, create and push a new application context.
+    ctx = app.app_context()
+    ctx.push()
+    try:
         from sqlalchemy.orm import scoped_session, sessionmaker
         Session = scoped_session(sessionmaker(bind=db.engine))
         session = Session()
@@ -133,13 +134,14 @@ def process_comments(post, phrase):
             print(f"Error processing comments for post {post.id}: {ce}")
         session.commit()
         session.remove()
+    finally:
+        ctx.pop()
 
 # -------------------------
 # Fetch and Process Data (Posts and Comments)
 # -------------------------
 def fetch_and_process_data(phrase, limit=49):
     global PROGRESS, PROCESSING_DONE, TOTAL_POSTS
-    # Run the entire function within an application context.
     with app.app_context():
         PROGRESS = 0
         PROCESSING_DONE = False
@@ -169,7 +171,7 @@ def fetch_and_process_data(phrase, limit=49):
                     print(f"Inserted post: {post.id} - {post.title[:50]}...")
                 except Exception as e:
                     print(f"Error inserting post {post.id}: {e}")
-                # Start a new thread to process comments for this post.
+                # Start a thread to process comments for this post
                 t = threading.Thread(target=process_comments, args=(post, phrase))
                 t.start()
                 comment_threads.append(t)
@@ -177,7 +179,7 @@ def fetch_and_process_data(phrase, limit=49):
                 PROGRESS = int((processed / TOTAL_POSTS) * 100)
                 print(f"Progress (posts processed): {PROGRESS}%")
         db.session.commit()
-        # Wait for all comment threads to finish.
+        # Wait for all comment threads to finish
         for t in comment_threads:
             t.join()
         PROGRESS = 100
@@ -199,10 +201,9 @@ def sentiment_category(compound):
         return "Very Negative"
 
 def analyze_data(phrase):
-    # Use an application context when accessing the database.
     with app.app_context():
         conn = db.engine.connect()
-        # Wrap the SQL query with text() to make it executable.
+        # Wrap the raw SQL query with text() so it’s executable.
         df = pd.read_sql_query(text("SELECT * FROM reddit_posts WHERE search_phrase = :phrase"), conn, params={"phrase": phrase})
         conn.close()
     if df.empty:
@@ -235,7 +236,7 @@ def analyze_data(phrase):
 # Flask Endpoints
 # -------------------------
 @app.route('/start_process', methods=['POST'])
-def start_process():
+def start_process_endpoint():
     global PROGRESS, PROCESSING_DONE
     data = request.get_json()
     phrase = data.get("search_phrase", "").strip()
@@ -244,7 +245,7 @@ def start_process():
     clear_db()
     PROGRESS = 0
     PROCESSING_DONE = False
-    # Start processing data in a separate thread; the thread itself will run inside an app context.
+    # Start processing in a separate thread
     thread = threading.Thread(target=fetch_and_process_data, args=(phrase, 49))
     thread.start()
     return jsonify({"message": "Processing started", "search_phrase": phrase})
