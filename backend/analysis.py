@@ -30,7 +30,7 @@ stop_words = set(stopwords.words("english"))
 # Flask App and PostgreSQL Database Setup
 # -------------------------
 app = Flask(__name__)
-# Use DATABASE_URL environment variable (set in Render) or fallback to SQLite for local testing
+# Set DATABASE_URL as an environment variable in Render; if not set, defaults to SQLite for local testing.
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL", "sqlite:///reddit_data.db")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -75,8 +75,8 @@ def clear_db():
 # -------------------------
 # Initialize PRAW
 # -------------------------
-CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"
-CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"
+CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"  # Replace as needed
+CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"  # Replace as needed
 USER_AGENT = "RedditGNN/1.0"
 
 reddit = praw.Reddit(client_id=CLIENT_ID,
@@ -87,7 +87,7 @@ reddit.read_only = True
 # -------------------------
 # Global Variables for Progress Tracking
 # -------------------------
-PROGRESS = 0         # Percentage (0-100) based on posts processed
+PROGRESS = 0         # Percentage (0-100) based on posts processed (not including comment processing)
 PROCESSING_DONE = False
 TOTAL_POSTS = 0      # Total posts fetched
 
@@ -102,7 +102,6 @@ def home():
 # Function to Process Comments (runs in a separate thread per post)
 # -------------------------
 def process_comments(post, phrase):
-    # Create a separate SQLAlchemy session for thread safety.
     from sqlalchemy.orm import scoped_session, sessionmaker
     Session = scoped_session(sessionmaker(bind=db.engine))
     session = Session()
@@ -164,7 +163,7 @@ def fetch_and_process_data(phrase, limit=49):
                 print(f"Inserted post: {post.id} - {post.title[:50]}...")
             except Exception as e:
                 print(f"Error inserting post {post.id}: {e}")
-            # Process comments in a separate thread
+            # Start thread for processing comments for this post
             t = threading.Thread(target=process_comments, args=(post, phrase))
             t.start()
             comment_threads.append(t)
@@ -194,9 +193,10 @@ def sentiment_category(compound):
         return "Very Negative"
 
 def analyze_data(phrase):
-    conn = db.engine.connect()
-    df = pd.read_sql_query("SELECT * FROM reddit_posts WHERE search_phrase = :phrase", conn, params={"phrase": phrase})
-    conn.close()
+    with app.app_context():
+        conn = db.engine.connect()
+        df = pd.read_sql_query("SELECT * FROM reddit_posts WHERE search_phrase = :phrase", conn, params={"phrase": phrase})
+        conn.close()
     if df.empty:
         return {}
     df['sentiment_category'] = df['sentiment'].apply(sentiment_category)
