@@ -19,7 +19,7 @@ with st.sidebar.form("search_form"):
 
 if submit_button and search_phrase:
     st.info("Processing... Please wait.")
-    backend_url = "http://127.0.0.1:5000"  # Ensure your Flask backend is running at this URL
+    backend_url = "https://reddit-setiment-analysis.onrender.com"  # Ensure your Flask backend is running at this URL
 
     # Start processing
     start_response = requests.post(f"{backend_url}/start_process", json={"search_phrase": search_phrase})
