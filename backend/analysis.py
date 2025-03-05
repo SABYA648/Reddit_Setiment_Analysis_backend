@@ -7,6 +7,7 @@ import datetime
 
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text  # Needed to wrap raw SQL queries
 
 import praw
 import nltk
@@ -76,8 +77,8 @@ def clear_db():
 # -------------------------
 # Initialize PRAW
 # -------------------------
-CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"       # Replace with your client ID
-CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"  # Replace with your client secret
+CLIENT_ID = "je3zlc6OY0kwZ1QBv1saUQ"  # Replace with your actual client ID
+CLIENT_SECRET = "WW8cw1B4ghOL6IKRqahr5qFJQcN87w"  # Replace with your actual client secret
 USER_AGENT = "RedditGNN/1.0"
 
 reddit = praw.Reddit(client_id=CLIENT_ID,
@@ -88,7 +89,7 @@ reddit.read_only = True
 # -------------------------
 # Global Variables for Progress Tracking
 # -------------------------
-PROGRESS = 0         # Percentage (0-100) based on posts processed
+PROGRESS = 0         # Percentage (0-100) based on posts processed (post-level only)
 PROCESSING_DONE = False
 TOTAL_POSTS = 0      # Total posts fetched
 
@@ -103,40 +104,42 @@ def home():
 # Function to Process Comments (runs in a separate thread per post)
 # -------------------------
 def process_comments(post, phrase):
-    # Create a separate SQLAlchemy session for thread safety.
-    from sqlalchemy.orm import scoped_session, sessionmaker
-    Session = scoped_session(sessionmaker(bind=db.engine))
-    session = Session()
-    try:
-        post.comments.replace_more(limit=None)
-        for comment in post.comments.list():
-            if comment and comment.id:
-                try:
-                    rc = RedditComment(
-                        id=comment.id,
-                        post_id=post.id,
-                        subreddit=post.subreddit.display_name,
-                        author=comment.author.name if comment.author else "N/A",
-                        content=comment.body,
-                        score=comment.score,
-                        timestamp=int(comment.created_utc),
-                        parent_id=comment.parent_id,
-                        search_phrase=phrase
-                    )
-                    session.merge(rc)
-                    print(f"Inserted comment: {comment.id} (score: {comment.score})")
-                except Exception as ce:
-                    print(f"Error inserting comment {comment.id}: {ce}")
-    except Exception as ce:
-        print(f"Error processing comments for post {post.id}: {ce}")
-    session.commit()
-    session.remove()
+    # Wrap the entire thread function inside an application context.
+    with app.app_context():
+        from sqlalchemy.orm import scoped_session, sessionmaker
+        Session = scoped_session(sessionmaker(bind=db.engine))
+        session = Session()
+        try:
+            post.comments.replace_more(limit=None)
+            for comment in post.comments.list():
+                if comment and comment.id:
+                    try:
+                        rc = RedditComment(
+                            id=comment.id,
+                            post_id=post.id,
+                            subreddit=post.subreddit.display_name,
+                            author=comment.author.name if comment.author else "N/A",
+                            content=comment.body,
+                            score=comment.score,
+                            timestamp=int(comment.created_utc),
+                            parent_id=comment.parent_id,
+                            search_phrase=phrase
+                        )
+                        session.merge(rc)
+                        print(f"Inserted comment: {comment.id} (score: {comment.score})")
+                    except Exception as ce:
+                        print(f"Error inserting comment {comment.id}: {ce}")
+        except Exception as ce:
+            print(f"Error processing comments for post {post.id}: {ce}")
+        session.commit()
+        session.remove()
 
 # -------------------------
 # Fetch and Process Data (Posts and Comments)
 # -------------------------
 def fetch_and_process_data(phrase, limit=49):
     global PROGRESS, PROCESSING_DONE, TOTAL_POSTS
+    # Run the entire function within an application context.
     with app.app_context():
         PROGRESS = 0
         PROCESSING_DONE = False
@@ -166,7 +169,7 @@ def fetch_and_process_data(phrase, limit=49):
                     print(f"Inserted post: {post.id} - {post.title[:50]}...")
                 except Exception as e:
                     print(f"Error inserting post {post.id}: {e}")
-                # Start a new thread to process comments for this post
+                # Start a new thread to process comments for this post.
                 t = threading.Thread(target=process_comments, args=(post, phrase))
                 t.start()
                 comment_threads.append(t)
@@ -174,7 +177,7 @@ def fetch_and_process_data(phrase, limit=49):
                 PROGRESS = int((processed / TOTAL_POSTS) * 100)
                 print(f"Progress (posts processed): {PROGRESS}%")
         db.session.commit()
-        # Wait for all comment threads to finish
+        # Wait for all comment threads to finish.
         for t in comment_threads:
             t.join()
         PROGRESS = 100
@@ -196,9 +199,11 @@ def sentiment_category(compound):
         return "Very Negative"
 
 def analyze_data(phrase):
+    # Use an application context when accessing the database.
     with app.app_context():
         conn = db.engine.connect()
-        df = pd.read_sql_query("SELECT * FROM reddit_posts WHERE search_phrase = :phrase", conn, params={"phrase": phrase})
+        # Wrap the SQL query with text() to make it executable.
+        df = pd.read_sql_query(text("SELECT * FROM reddit_posts WHERE search_phrase = :phrase"), conn, params={"phrase": phrase})
         conn.close()
     if df.empty:
         return {}
@@ -239,7 +244,7 @@ def start_process():
     clear_db()
     PROGRESS = 0
     PROCESSING_DONE = False
-    # Start processing data in a separate thread
+    # Start processing data in a separate thread; the thread itself will run inside an app context.
     thread = threading.Thread(target=fetch_and_process_data, args=(phrase, 49))
     thread.start()
     return jsonify({"message": "Processing started", "search_phrase": phrase})
