@@ -4,3 +4,4 @@ nltk==3.8.1
 pandas==1.5.3
 networkx==2.8.8
 wordcloud
+Werkzeug<3.0
